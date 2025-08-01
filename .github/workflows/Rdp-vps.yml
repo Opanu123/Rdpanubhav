@@ -1,0 +1,123 @@
+name: Auto VPS with RDP + Filebase Backup + Password Setup
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"  # every 6 hours
+  workflow_dispatch:
+
+jobs:
+  start-vps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 370  # 6 hours + buffer
+
+    steps:
+      - name: ⬇️ Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: 📁 Create folders
+        run: mkdir -p links .backup
+
+      - name: 📥 Install rclone
+        run: curl https://rclone.org/install.sh | sudo bash
+
+      - name: 🔁 Restore backup from Filebase
+        env:
+          FILEBASE_ACCESS_KEY: ${{ secrets.FILEBASE_ACCESS_KEY }}
+          FILEBASE_SECRET_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
+          FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
+        run: |
+          echo "[filebase]" > rclone.conf
+          echo "type = s3" >> rclone.conf
+          echo "provider = Other" >> rclone.conf
+          echo "env_auth = false" >> rclone.conf
+          echo "access_key_id = $FILEBASE_ACCESS_KEY" >> rclone.conf
+          echo "secret_access_key = $FILEBASE_SECRET_KEY" >> rclone.conf
+          echo "endpoint = https://s3.filebase.com" >> rclone.conf
+
+          echo "🔁 Checking for backup..."
+          rclone --config rclone.conf copy filebase:$FILEBASE_BUCKET/autovps.zip . || echo "❌ No backup found"
+          unzip -o autovps.zip || echo "❌ Unzip failed"
+
+      - name: 🖥️ Install XFCE desktop and XRDP
+        run: |
+          sudo apt update
+          sudo apt install -y xfce4 xfce4-goodies xrdp
+
+          # Create user runner if not exists
+          if ! id -u runner >/dev/null 2>&1; then
+            sudo adduser --disabled-password --gecos "" runner
+          fi
+
+          # Set password for runner user from secret
+          echo "runner:${{ secrets.RDP_PASSWORD }}" | sudo chpasswd
+
+          # Add runner to ssl-cert group for xrdp
+          sudo adduser runner ssl-cert
+
+          # Configure XRDP to use xfce
+          echo "startxfce4" | sudo tee /home/runner/.xsession
+          sudo chown runner:runner /home/runner/.xsession
+
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
+
+      - name: 🌐 Install Chrome and Firefox
+        run: |
+          wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt install -y ./google-chrome-stable_current_amd64.deb || sudo apt-get -f install -y
+          rm google-chrome-stable_current_amd64.deb
+          sudo apt install -y firefox
+
+      - name: 🔐 Start tmate SSH session
+        run: |
+          sudo apt install -y tmate
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+          echo "$SSH" > links/ssh.txt
+          echo "✅ SSH: $SSH"
+
+      - name: 💻 Get VPS public IP (for RDP)
+        run: |
+          IP=$(curl -s https://api.ipify.org)
+          echo "RDP IP: $IP"
+          echo "$IP" > links/rdp_ip.txt
+
+      - name: 🕵️‍♂️ Debug links folder
+        run: |
+          echo "---- Links folder contents ----"
+          ls -la links
+          echo "---- ssh.txt content ----"
+          cat links/ssh.txt
+          echo "---- rdp_ip.txt content ----"
+          cat links/rdp_ip.txt
+
+      - name: 💾 Save SSH and RDP IP to repo
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "🔁 Updated SSH and RDP IP"
+          file_pattern: 'links/*.txt'
+
+      - name: 💾 Auto backup every 30 mins
+        env:
+          FILEBASE_ACCESS_KEY: ${{ secrets.FILEBASE_ACCESS_KEY }}
+          FILEBASE_SECRET_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
+          FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
+        run: |
+          echo "[filebase]" > rclone.conf
+          echo "type = s3" >> rclone.conf
+          echo "provider = Other" >> rclone.conf
+          echo "env_auth = false" >> rclone.conf
+          echo "access_key_id = $FILEBASE_ACCESS_KEY" >> rclone.conf
+          echo "secret_access_key = $FILEBASE_SECRET_KEY" >> rclone.conf
+          echo "endpoint = https://s3.filebase.com" >> rclone.conf
+
+          for i in {1..12}; do
+            echo "🔄 Backup $i"
+            zip -r autovps.zip . -x ".git/*" ".github/*" "links/*"
+            rclone --config rclone.conf copy autovps.zip filebase:$FILEBASE_BUCKET
+            sleep 1800
+          done
+
+      - name: ⏳ VPS finished 6 hour session
+        run: echo "✅ VPS work done for this session."
