@@ -1,123 +1,112 @@
-name: Auto VPS with RDP + Filebase Backup + Password Setup
+name: Windows RDP with Auto Backup + Filebase Restore
 
 on:
   schedule:
-    - cron: "0 */6 * * *"  # every 6 hours
+    - cron: "0 */6 * * *"  # Every 6 hours
   workflow_dispatch:
 
 jobs:
-  start-vps:
-    runs-on: ubuntu-latest
-    timeout-minutes: 370  # 6 hours + buffer
+  windows-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 370
 
     steps:
-      - name: ⬇️ Checkout Repo
-        uses: actions/checkout@v3
+    - name: Checkout repo
+      uses: actions/checkout@v3
 
-      - name: 📁 Create folders
-        run: mkdir -p links .backup
+    - name: Create folders
+      run: |
+        mkdir links
+        mkdir games
 
-      - name: 📥 Install rclone
-        run: curl https://rclone.org/install.sh | sudo bash
+    - name: Download ngrok
+      run: Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
 
-      - name: 🔁 Restore backup from Filebase
-        env:
-          FILEBASE_ACCESS_KEY: ${{ secrets.FILEBASE_ACCESS_KEY }}
-          FILEBASE_SECRET_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
-          FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
-        run: |
-          echo "[filebase]" > rclone.conf
-          echo "type = s3" >> rclone.conf
-          echo "provider = Other" >> rclone.conf
-          echo "env_auth = false" >> rclone.conf
-          echo "access_key_id = $FILEBASE_ACCESS_KEY" >> rclone.conf
-          echo "secret_access_key = $FILEBASE_SECRET_KEY" >> rclone.conf
-          echo "endpoint = https://s3.filebase.com" >> rclone.conf
+    - name: Extract ngrok
+      run: Expand-Archive ngrok.zip
 
-          echo "🔁 Checking for backup..."
-          rclone --config rclone.conf copy filebase:$FILEBASE_BUCKET/autovps.zip . || echo "❌ No backup found"
-          unzip -o autovps.zip || echo "❌ Unzip failed"
+    - name: Authenticate ngrok
+      run: .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
+      env:
+        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
 
-      - name: 🖥️ Install XFCE desktop and XRDP
-        run: |
-          sudo apt update
-          sudo apt install -y xfce4 xfce4-goodies xrdp
+    - name: Enable RDP + Set Password
+      run: |
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        net user runneradmin "P@ssw0rd!"
 
-          # Create user runner if not exists
-          if ! id -u runner >/dev/null 2>&1; then
-            sudo adduser --disabled-password --gecos "" runner
-          fi
+    - name: Install rclone
+      run: |
+        iwr https://downloads.rclone.org/rclone-current-windows-amd64.zip -OutFile rclone.zip
+        Expand-Archive rclone.zip -DestinationPath rclone
+        $env:Path += ";$PWD\rclone\rclone-*-windows-amd64"
 
-          # Set password for runner user from secret
-          echo "runner:${{ secrets.RDP_PASSWORD }}" | sudo chpasswd
+    - name: Restore from Filebase
+      env:
+        FILEBASE_ACCESS_KEY: ${{ secrets.FILEBASE_ACCESS_KEY }}
+        FILEBASE_SECRET_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
+        FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
+      run: |
+        echo [filebase] > rclone.conf
+        echo type = s3 >> rclone.conf
+        echo provider = Other >> rclone.conf
+        echo env_auth = false >> rclone.conf
+        echo access_key_id = $Env:FILEBASE_ACCESS_KEY >> rclone.conf
+        echo secret_access_key = $Env:FILEBASE_SECRET_KEY >> rclone.conf
+        echo endpoint = https://s3.filebase.com >> rclone.conf
 
-          # Add runner to ssl-cert group for xrdp
-          sudo adduser runner ssl-cert
+        .\rclone\rclone-*\rclone.exe --config rclone.conf copy filebase:$Env:FILEBASE_BUCKET/windows-backup.zip .
+        if (Test-Path "windows-backup.zip") {
+          Expand-Archive windows-backup.zip -Force
+        }
 
-          # Configure XRDP to use xfce
-          echo "startxfce4" | sudo tee /home/runner/.xsession
-          sudo chown runner:runner /home/runner/.xsession
+    - name: Start ngrok RDP tunnel
+      run: |
+        Start-Process -FilePath .\ngrok\ngrok.exe -ArgumentList "tcp 3389" -WindowStyle Hidden
+        Start-Sleep -Seconds 10
+        $ngrokURL = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels"
+        $rdpLink = $ngrokURL.tunnels[0].public_url
+        echo $rdpLink > links/rdp.txt
+        echo "RDP link: $rdpLink"
 
-          sudo systemctl enable xrdp
-          sudo systemctl restart xrdp
+    - name: Commit RDP link
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "🔗 Updated RDP link"
+        file_pattern: "links/rdp.txt"
 
-      - name: 🌐 Install Chrome and Firefox
-        run: |
-          wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt install -y ./google-chrome-stable_current_amd64.deb || sudo apt-get -f install -y
-          rm google-chrome-stable_current_amd64.deb
-          sudo apt install -y firefox
+    - name: Auto Backup every 30 minutes (12x)
+      env:
+        FILEBASE_ACCESS_KEY: ${{ secrets.FILEBASE_ACCESS_KEY }}
+        FILEBASE_SECRET_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
+        FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
+      run: |
+        echo [filebase] > rclone.conf
+        echo type = s3 >> rclone.conf
+        echo provider = Other >> rclone.conf
+        echo env_auth = false >> rclone.conf
+        echo access_key_id = $Env:FILEBASE_ACCESS_KEY >> rclone.conf
+        echo secret_access_key = $Env:FILEBASE_SECRET_KEY >> rclone.conf
+        echo endpoint = https://s3.filebase.com >> rclone.conf
 
-      - name: 🔐 Start tmate SSH session
-        run: |
-          sudo apt install -y tmate
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-          SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          echo "$SSH" > links/ssh.txt
-          echo "✅ SSH: $SSH"
+        for ($i = 1; $i -le 12; $i++) {
+          Write-Output "Backup iteration $i"
 
-      - name: 💻 Get VPS public IP (for RDP)
-        run: |
-          IP=$(curl -s https://api.ipify.org)
-          echo "RDP IP: $IP"
-          echo "$IP" > links/rdp_ip.txt
+          # 🔄 Auto move downloaded files to "games" folder
+          $downloads = "$Env:USERPROFILE\Downloads"
+          if (Test-Path $downloads) {
+            Copy-Item "$downloads\*" "games\" -Recurse -Force -ErrorAction SilentlyContinue
+          }
 
-      - name: 🕵️‍♂️ Debug links folder
-        run: |
-          echo "---- Links folder contents ----"
-          ls -la links
-          echo "---- ssh.txt content ----"
-          cat links/ssh.txt
-          echo "---- rdp_ip.txt content ----"
-          cat links/rdp_ip.txt
+          # 📦 Compress all files including games
+          Compress-Archive -Path * -DestinationPath windows-backup.zip -Force
 
-      - name: 💾 Save SSH and RDP IP to repo
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "🔁 Updated SSH and RDP IP"
-          file_pattern: 'links/*.txt'
+          # ☁️ Upload to Filebase
+          .\rclone\rclone-*\rclone.exe --config rclone.conf copy windows-backup.zip filebase:$Env:FILEBASE_BUCKET
 
-      - name: 💾 Auto backup every 30 mins
-        env:
-          FILEBASE_ACCESS_KEY: ${{ secrets.FILEBASE_ACCESS_KEY }}
-          FILEBASE_SECRET_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
-          FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
-        run: |
-          echo "[filebase]" > rclone.conf
-          echo "type = s3" >> rclone.conf
-          echo "provider = Other" >> rclone.conf
-          echo "env_auth = false" >> rclone.conf
-          echo "access_key_id = $FILEBASE_ACCESS_KEY" >> rclone.conf
-          echo "secret_access_key = $FILEBASE_SECRET_KEY" >> rclone.conf
-          echo "endpoint = https://s3.filebase.com" >> rclone.conf
+          Start-Sleep -Seconds 1800
+        }
 
-          for i in {1..12}; do
-            echo "🔄 Backup $i"
-            zip -r autovps.zip . -x ".git/*" ".github/*" "links/*"
-            rclone --config rclone.conf copy autovps.zip filebase:$FILEBASE_BUCKET
-            sleep 1800
-          done
-
-      - name: ⏳ VPS finished 6 hour session
-        run: echo "✅ VPS work done for this session."
+    - name: Done
+      run: Write-Output "✅ RDP session complete. Auto-backup done."
