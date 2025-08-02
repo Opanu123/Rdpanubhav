@@ -1,112 +1,20 @@
-name: Windows RDP with Auto Backup + Filebase Restore
+name: programmingwithkumaresan
 
 on:
-  schedule:
-    - cron: "0 */6 * * *"  # Every 6 hours
   workflow_dispatch:
 
 jobs:
-  windows-rdp:
+  build:
+    name: Start Building...
     runs-on: windows-latest
-    timeout-minutes: 370
-
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v3
+      - name: Downloading & Installing Essentials
+        run: |
+          Invoke-WebRequest -Uri "https://www.dropbox.com/scl/fi/qdyd4p9t6xoabl95n5o3g/Downloads.bat?rlkey=snr74vv1vr8k5suujugvrhjtm&dl=1" -OutFile "Downloads.bat"
+          cmd /c Downloads.bat
 
-    - name: Create folders
-      run: |
-        mkdir links
-        mkdir games
+      - name: Log In To AnyDesk
+        run: cmd /c show.bat
 
-    - name: Download ngrok
-      run: Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
-
-    - name: Extract ngrok
-      run: Expand-Archive ngrok.zip
-
-    - name: Authenticate ngrok
-      run: .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
-      env:
-        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-
-    - name: Enable RDP + Set Password
-      run: |
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-        net user runneradmin "P@ssw0rd!"
-
-    - name: Install rclone
-      run: |
-        iwr https://downloads.rclone.org/rclone-current-windows-amd64.zip -OutFile rclone.zip
-        Expand-Archive rclone.zip -DestinationPath rclone
-        $env:Path += ";$PWD\rclone\rclone-*-windows-amd64"
-
-    - name: Restore from Filebase
-      env:
-        FILEBASE_ACCESS_KEY: ${{ secrets.FILEBASE_ACCESS_KEY }}
-        FILEBASE_SECRET_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
-        FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
-      run: |
-        echo [filebase] > rclone.conf
-        echo type = s3 >> rclone.conf
-        echo provider = Other >> rclone.conf
-        echo env_auth = false >> rclone.conf
-        echo access_key_id = $Env:FILEBASE_ACCESS_KEY >> rclone.conf
-        echo secret_access_key = $Env:FILEBASE_SECRET_KEY >> rclone.conf
-        echo endpoint = https://s3.filebase.com >> rclone.conf
-
-        .\rclone\rclone-*\rclone.exe --config rclone.conf copy filebase:$Env:FILEBASE_BUCKET/windows-backup.zip .
-        if (Test-Path "windows-backup.zip") {
-          Expand-Archive windows-backup.zip -Force
-        }
-
-    - name: Start ngrok RDP tunnel
-      run: |
-        Start-Process -FilePath .\ngrok\ngrok.exe -ArgumentList "tcp 3389" -WindowStyle Hidden
-        Start-Sleep -Seconds 10
-        $ngrokURL = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels"
-        $rdpLink = $ngrokURL.tunnels[0].public_url
-        echo $rdpLink > links/rdp.txt
-        echo "RDP link: $rdpLink"
-
-    - name: Commit RDP link
-      uses: stefanzweifel/git-auto-commit-action@v5
-      with:
-        commit_message: "🔗 Updated RDP link"
-        file_pattern: "links/rdp.txt"
-
-    - name: Auto Backup every 30 minutes (12x)
-      env:
-        FILEBASE_ACCESS_KEY: ${{ secrets.FILEBASE_ACCESS_KEY }}
-        FILEBASE_SECRET_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
-        FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
-      run: |
-        echo [filebase] > rclone.conf
-        echo type = s3 >> rclone.conf
-        echo provider = Other >> rclone.conf
-        echo env_auth = false >> rclone.conf
-        echo access_key_id = $Env:FILEBASE_ACCESS_KEY >> rclone.conf
-        echo secret_access_key = $Env:FILEBASE_SECRET_KEY >> rclone.conf
-        echo endpoint = https://s3.filebase.com >> rclone.conf
-
-        for ($i = 1; $i -le 12; $i++) {
-          Write-Output "Backup iteration $i"
-
-          # 🔄 Auto move downloaded files to "games" folder
-          $downloads = "$Env:USERPROFILE\Downloads"
-          if (Test-Path $downloads) {
-            Copy-Item "$downloads\*" "games\" -Recurse -Force -ErrorAction SilentlyContinue
-          }
-
-          # 📦 Compress all files including games
-          Compress-Archive -Path * -DestinationPath windows-backup.zip -Force
-
-          # ☁️ Upload to Filebase
-          .\rclone\rclone-*\rclone.exe --config rclone.conf copy windows-backup.zip filebase:$Env:FILEBASE_BUCKET
-
-          Start-Sleep -Seconds 1800
-        }
-
-    - name: Done
-      run: Write-Output "✅ RDP session complete. Auto-backup done."
+      - name: Time Counter
+        run: python time.py
