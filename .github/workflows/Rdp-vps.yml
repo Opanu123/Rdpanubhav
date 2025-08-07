@@ -1,25 +1,82 @@
-name: CI
+name: Windows RDP with LocalXpose + Auto Backup
 
-on: [push, workflow_dispatch]
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
 
 jobs:
-  build:
-
+  rdp:
     runs-on: windows-latest
+    timeout-minutes: 350
+
+    env:
+      LOCALXPOSE_AUTH_TOKEN: ${{ secrets.LOCALXPOSE_AUTH_TOKEN }}
+      LOCALXPOSE_SUBDOMAIN: gamingrdp  # replace with your reserved subdomain
+      FILEBASE_ACCESS_KEY: ${{ secrets.FILEBASE_ACCESS_KEY }}
+      FILEBASE_SECRET_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
+      FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
+      RDP_USER: runner
+      RDP_PASSWORD: MySecurePass123!
 
     steps:
-    - name: Download
-      run: Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
-    - name: Extract
-      run: Expand-Archive ngrok.zip
-    - name: Auth
-      run: .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
-      env:
-        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-    - name: Enable TS
-      run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server'-name "fDenyTSConnections" -Value 0
-    - run: Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-    - run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
-    - run: Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "P@ssw0rd!" -Force)
-    - name: Create Tunnel
-      run: .\ngrok\ngrok.exe tcp 3389
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Enable RDP and set firewall
+        run: |
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+          netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
+
+      - name: Set RDP user password
+        run: net user %RDP_USER% %RDP_PASSWORD%
+
+      - name: Download LocalXpose
+        run: curl -L https://localxpose.io/releases/windows/localxpose.exe -o localxpose.exe
+
+      - name: Login LocalXpose
+        run: .\localxpose.exe login --auth-token %LOCALXPOSE_AUTH_TOKEN%
+
+      - name: Start LocalXpose Tunnel (background)
+        shell: pwsh
+        run: Start-Process -NoNewWindow -FilePath .\localxpose.exe -ArgumentList "tunnel tcp --port 3389 --subdomain %LOCALXPOSE_SUBDOMAIN%"
+
+      - name: Create links folder
+        run: mkdir links
+
+      - name: Save RDP Link to repo
+        run: echo rdp://%LOCALXPOSE_SUBDOMAIN%.loclx.io:3389 > links/rdp_link.txt
+
+      - name: Commit and push RDP link
+        run: |
+          git config --global user.name "Auto Bot"
+          git config --global user.email "auto@bot.com"
+          git add links/rdp_link.txt
+          git commit -m "Updated RDP link %DATE%" || echo "No changes"
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} HEAD:main
+
+      - name: Install AWS CLI
+        run: |
+          curl "https://awscli.amazonaws.com/AWSCLIV2.msi" -o "AWSCLIV2.msi"
+          msiexec.exe /i AWSCLIV2.msi /quiet
+
+      - name: Restore Backup from Filebase
+        run: |
+          mkdir C:\backup
+          aws configure set aws_access_key_id %FILEBASE_ACCESS_KEY%
+          aws configure set aws_secret_access_key %FILEBASE_SECRET_KEY%
+          aws configure set default.region us-east-1
+          aws --endpoint-url=https://s3.filebase.com s3 cp s3://%FILEBASE_BUCKET%/data.zip C:\backup\data.zip || echo "No backup found"
+          if exist C:\backup\data.zip powershell -Command "Expand-Archive -Path C:\backup\data.zip -DestinationPath C:\data -Force"
+
+      - name: Auto Backup Every 30 Minutes (loop)
+        shell: pwsh
+        run: |
+          while ($true) {
+            Compress-Archive -Path C:\data\* -DestinationPath C:\backup\data.zip -Force
+            aws --endpoint-url=https://s3.filebase.com s3 cp C:\backup\data.zip s3://$env:FILEBASE_BUCKET/data.zip
+            Start-Sleep -Seconds 1800
+          }
+
+      - name: Keep job alive
+        run: ping -t localhost
