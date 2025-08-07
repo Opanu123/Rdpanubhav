@@ -12,7 +12,7 @@ jobs:
 
     env:
       LOCALXPOSE_AUTH_TOKEN: ${{ secrets.LOCALXPOSE_AUTH_TOKEN }}
-      LOCALXPOSE_SUBDOMAIN: gamingrdp  # replace with your LocalXpose reserved subdomain
+      LOCALXPOSE_SUBDOMAIN: gamingrdp  # your reserved subdomain here
       FILEBASE_ACCESS_KEY: ${{ secrets.FILEBASE_ACCESS_KEY }}
       FILEBASE_SECRET_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
       FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
@@ -28,34 +28,44 @@ jobs:
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
           netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
 
-      - name: Create or Set RDP User Password
-        shell: powershell
+      - name: Create and configure RDP user
+        shell: pwsh
         run: |
-          $user = "$Env:RDP_USER"
-          $password = "$Env:RDP_PASSWORD"
-          $userExists = Get-LocalUser -Name $user -ErrorAction SilentlyContinue
+          $RDP_USER = "${{ env.RDP_USER }}"
+          $RDP_PASSWORD_FULL = "${{ env.RDP_PASSWORD }}"
+          $RDP_PASSWORD = $RDP_PASSWORD_FULL.Substring(0, [Math]::Min($RDP_PASSWORD_FULL.Length,14))
+
+          $userExists = Get-LocalUser -Name $RDP_USER -ErrorAction SilentlyContinue
 
           if (-not $userExists) {
-            Write-Host "User $user does not exist. Creating user..."
-            net user $user $password /add
-            net localgroup "Remote Desktop Users" $user /add
+              Write-Host "User $RDP_USER does not exist. Creating user..."
+              net user $RDP_USER $RDP_PASSWORD /add
           } else {
-            Write-Host "User $user exists. Setting password..."
-            net user $user $password
+              Write-Host "User $RDP_USER already exists. Setting password..."
+              net user $RDP_USER $RDP_PASSWORD
+          }
+
+          $rdpGroup = Get-LocalGroup | Where-Object { $_.Name -match 'Remote Desktop Users' }
+
+          if ($rdpGroup) {
+              Write-Host "Adding user $RDP_USER to group '$($rdpGroup.Name)'"
+              Add-LocalGroupMember -Group $rdpGroup.Name -Member $RDP_USER -ErrorAction SilentlyContinue
+          } else {
+              Write-Host "Remote Desktop Users group not found. Skipping group addition."
           }
 
       - name: Download LocalXpose
         run: curl -L https://localxpose.io/releases/windows/localxpose.exe -o localxpose.exe
 
       - name: Login LocalXpose
-        run: .\localxpose.exe login --auth-token %LOCALXPOSE_AUTH_TOKEN%
+        run: .\localxpose.exe login --auth-token ${{ secrets.LOCALXPOSE_AUTH_TOKEN }}
 
       - name: Start LocalXpose Tunnel (background)
         shell: pwsh
-        run: Start-Process -NoNewWindow -FilePath .\localxpose.exe -ArgumentList "tunnel tcp --port 3389 --subdomain %LOCALXPOSE_SUBDOMAIN%"
+        run: Start-Process -NoNewWindow -FilePath .\localxpose.exe -ArgumentList "tunnel tcp --port 3389 --subdomain ${{ env.LOCALXPOSE_SUBDOMAIN }}"
 
       - name: Save RDP Link to repo
-        run: echo "rdp://%LOCALXPOSE_SUBDOMAIN%.loclx.io:3389" > links/rdp_link.txt
+        run: echo "rdp://${{ env.LOCALXPOSE_SUBDOMAIN }}.loclx.io:3389" > links/rdp_link.txt
 
       - name: Commit and push RDP link
         run: |
@@ -71,10 +81,11 @@ jobs:
           msiexec.exe /i AWSCLIV2.msi /quiet
 
       - name: Restore Backup from Filebase (if exists)
+        shell: pwsh
         run: |
           if (Test-Path "C:\backup\data.zip") { Remove-Item "C:\backup\data.zip" -Force }
           New-Item -ItemType Directory -Path C:\backup -Force
-          aws --endpoint-url=https://s3.filebase.com s3 cp s3://%FILEBASE_BUCKET%/data.zip C:\backup\data.zip || echo "No backup found"
+          aws --endpoint-url=https://s3.filebase.com s3 cp s3://${{ env.FILEBASE_BUCKET }}/data.zip C:\backup\data.zip || Write-Host "No backup found"
           if (Test-Path "C:\backup\data.zip") {
             Expand-Archive -Path C:\backup\data.zip -DestinationPath C:\data -Force
           }
@@ -84,6 +95,6 @@ jobs:
         run: |
           while ($true) {
             Compress-Archive -Path C:\data\* -DestinationPath C:\backup\data.zip -Force
-            aws --endpoint-url=https://s3.filebase.com s3 cp C:\backup\data.zip s3://%FILEBASE_BUCKET%/data.zip
+            aws --endpoint-url=https://s3.filebase.com s3 cp C:\backup\data.zip s3://${{ env.FILEBASE_BUCKET }}/data.zip
             Start-Sleep -Seconds 1800
           }
