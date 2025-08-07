@@ -12,12 +12,12 @@ jobs:
 
     env:
       LOCALXPOSE_AUTH_TOKEN: ${{ secrets.LOCALXPOSE_AUTH_TOKEN }}
-      LOCALXPOSE_SUBDOMAIN: gamingrdp  # your reserved subdomain here
+      LOCALXPOSE_SUBDOMAIN: gamingrdp
       FILEBASE_ACCESS_KEY: ${{ secrets.FILEBASE_ACCESS_KEY }}
       FILEBASE_SECRET_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
       FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
       RDP_USER: runner
-      RDP_PASSWORD: MySecyrePass123!
+      RDP_PASSWORD: MySecure1234!
 
     steps:
       - name: Checkout repo
@@ -50,8 +50,6 @@ jobs:
           if ($rdpGroup) {
               Write-Host "Adding user $RDP_USER to group '$($rdpGroup.Name)'"
               Add-LocalGroupMember -Group $rdpGroup.Name -Member $RDP_USER -ErrorAction SilentlyContinue
-          } else {
-              Write-Host "Remote Desktop Users group not found. Skipping group addition."
           }
 
       - name: Download LocalXpose
@@ -62,10 +60,13 @@ jobs:
 
       - name: Start LocalXpose Tunnel (background)
         shell: pwsh
-        run: Start-Process -NoNewWindow -FilePath .\localxpose.exe -ArgumentList "tunnel tcp --port 3389 --subdomain ${{ env.LOCALXPOSE_SUBDOMAIN }}"
+        run: |
+          Start-Process -NoNewWindow -FilePath .\localxpose.exe -ArgumentList "tunnel tcp --port 3389 --subdomain $env:LOCALXPOSE_SUBDOMAIN"
 
       - name: Save RDP Link to repo
-        run: echo "rdp://${{ env.LOCALXPOSE_SUBDOMAIN }}.loclx.io:3389" > links/rdp_link.txt
+        run: |
+          mkdir links
+          echo "rdp://${{ env.LOCALXPOSE_SUBDOMAIN }}.loclx.io:3389" > links/rdp_link.txt
 
       - name: Commit and push RDP link
         run: |
