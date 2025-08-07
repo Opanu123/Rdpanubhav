@@ -1,9 +1,9 @@
-name: Windows RDP with LocalXpose and Filebase
+name: Windows RDP with LocalXpose and Backup
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 */6 * * *"  # Every 6 hours
 
 jobs:
   rdp:
@@ -13,54 +13,62 @@ jobs:
     env:
       RDP_USER: gamingrdp
       RDP_PASSWORD: MySecurePass123!
-      LOCALXPOSE_SUBDOMAIN: gamingrdp
-      BACKUP_ZIP: system-backup.zip
-      FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.FILEBASE_ACCESS_KEY }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
 
     steps:
-      - name: 🗂️ Checkout repo
+      - name: 📁 Checkout repo
         uses: actions/checkout@v4
 
-      - name: 🧪 Create RDP user
+      - name: 🧪 Create RDP user and add to Administrators
         run: |
           net user %RDP_USER% || net user %RDP_USER% %RDP_PASSWORD% /add
-          net localgroup administrators %RDP_USER% /add
+          net localgroup administrators | findstr /C:"%RDP_USER%" >nul || net localgroup administrators %RDP_USER% /add
 
-      - name: 🔧 Enable RDP
+      - name: 💻 Enable RDP and set password
         run: |
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
-      - name: 📦 Download fresh LocalXpose binary
+      - name: 🌐 Install LocalXpose tunnel
         run: |
-          Invoke-WebRequest -Uri "https://localxpose.io/localxpose.exe" -OutFile "localxpose.exe"
+          Invoke-WebRequest -Uri https://localxpose.io/localxpose.exe -OutFile localxpose.exe
+          ./localxpose.exe login --auth-token $Env:LOCX_TOKEN
+          ./localxpose.exe tcp --subdomain gamingrdp --port 3389 > lx.txt
 
-      - name: 🔐 Login to LocalXpose
-        run: .\localxpose.exe login --auth-token ${{ secrets.LOCALXPOSE_AUTH_TOKEN }}
-
-      - name: 🌐 Start LocalXpose RDP Tunnel
+      - name: 🕓 Start RDP wait loop and tunnel print
         run: |
-          Start-Process -NoNewWindow -FilePath ".\localxpose.exe" -ArgumentList "tcp --to 3389 --subdomain $Env:LOCALXPOSE_SUBDOMAIN"
+          Start-Process -FilePath "localxpose.exe" -ArgumentList "tcp --subdomain gamingrdp --port 3389" -NoNewWindow
+          Start-Sleep -Seconds 30
+          Get-Content lx.txt
 
-      - name: ⏳ Wait for LocalXpose Tunnel
-        run: Start-Sleep -Seconds 30
-
-      - name: 🔁 Restore backup from Filebase (if available)
+      - name: 💾 Install AWS CLI (for Filebase)
         run: |
-          aws s3 cp s3://%FILEBASE_BUCKET%/%BACKUP_ZIP% %BACKUP_ZIP% || echo "No backup found."
-          if (Test-Path %BACKUP_ZIP%) {
-            Expand-Archive -Path %BACKUP_ZIP% -DestinationPath .
+          msiexec.exe /i https://awscli.amazonaws.com/AWSCLIV2.msi /qn
+          echo "[default]" > $env:USERPROFILE\.aws\credentials
+          echo "aws_access_key_id=${{ secrets.FILEBASE_ACCESS_KEY }}" >> $env:USERPROFILE\.aws\credentials
+          echo "aws_secret_access_key=${{ secrets.FILEBASE_SECRET_KEY }}" >> $env:USERPROFILE\.aws\credentials
+          echo "[default]" > $env:USERPROFILE\.aws\config
+          echo "region = us-east-1" >> $env:USERPROFILE\.aws\config
+          echo "s3 =" >> $env:USERPROFILE\.aws\config
+          echo "  endpoint_url = https://s3.filebase.com" >> $env:USERPROFILE\.aws\config
+
+      - name: ♻️ Restore system files from Filebase
+        run: |
+          aws s3 cp s3://${{ secrets.FILEBASE_BUCKET }}/windows-backup.zip windows-backup.zip || echo "No previous backup found"
+          if (Test-Path "windows-backup.zip") {
+            Expand-Archive windows-backup.zip -DestinationPath C:\ || echo "No archive to extract"
           }
 
-      - name: 🔄 Auto Backup Loop to Filebase
+      - name: 🔁 Auto-backup loop every 30 min
         run: |
-          echo 'Starting background backup loop...'
-          powershell -NoProfile -ExecutionPolicy Bypass -Command "
-            while (\$true) {
-              Compress-Archive -Path * -DestinationPath %BACKUP_ZIP% -Force
-              aws s3 cp %BACKUP_ZIP% s3://%FILEBASE_BUCKET%/%BACKUP_ZIP%
-              Start-Sleep -Seconds 1800
-            }
-          " &
+          $code = @"
+          while ($true) {
+            Compress-Archive -Path C:\Users\$env:RDP_USER -DestinationPath backup.zip -Force
+            aws s3 cp backup.zip s3://${{ secrets.FILEBASE_BUCKET }}/windows-backup.zip
+            Start-Sleep -Seconds 1800
+          }
+"@
+          $code | Out-File backup.ps1 -Encoding ASCII
+          Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File backup.ps1"
+
+      - name: 💤 Keep alive
+        run: timeout /t 21600
