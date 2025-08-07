@@ -3,7 +3,7 @@ name: Windows RDP with LocalXpose + Auto Backup
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 */6 * * *"  # every 6 hours
 
 jobs:
   rdp:
@@ -12,71 +12,75 @@ jobs:
 
     env:
       LOCALXPOSE_AUTH_TOKEN: ${{ secrets.LOCALXPOSE_AUTH_TOKEN }}
-      LOCALXPOSE_SUBDOMAIN: gamingrdp  # replace with your reserved subdomain
+      LOCALXPOSE_SUBDOMAIN: gamingrdp   # your chosen subdomain
       FILEBASE_ACCESS_KEY: ${{ secrets.FILEBASE_ACCESS_KEY }}
       FILEBASE_SECRET_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
       FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
       RDP_USER: runner
-      RDP_PASSWORD: MySecurePass123!
+      RDP_PASSWORD: MySecyrePass123!
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Enable RDP and set firewall
+      - name: Enable Windows RDP & Firewall
+        shell: powershell
         run: |
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
           netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
 
       - name: Set RDP user password
-        run: net user %RDP_USER% %RDP_PASSWORD%
+        shell: powershell
+        run: net user $Env:RDP_USER $Env:RDP_PASSWORD
 
       - name: Download LocalXpose
+        shell: powershell
         run: curl -L https://localxpose.io/releases/windows/localxpose.exe -o localxpose.exe
 
       - name: Login LocalXpose
-        run: .\localxpose.exe login --auth-token %LOCALXPOSE_AUTH_TOKEN%
+        shell: powershell
+        run: .\localxpose.exe login --auth-token $Env:LOCALXPOSE_AUTH_TOKEN
 
       - name: Start LocalXpose Tunnel (background)
-        shell: pwsh
-        run: Start-Process -NoNewWindow -FilePath .\localxpose.exe -ArgumentList "tunnel tcp --port 3389 --subdomain %LOCALXPOSE_SUBDOMAIN%"
-
-      - name: Create links folder
-        run: mkdir links
+        shell: powershell
+        run: Start-Process -NoNewWindow -FilePath .\localxpose.exe -ArgumentList "tunnel tcp --port 3389 --subdomain $Env:LOCALXPOSE_SUBDOMAIN"
 
       - name: Save RDP Link to repo
-        run: echo rdp://%LOCALXPOSE_SUBDOMAIN%.loclx.io:3389 > links/rdp_link.txt
+        shell: powershell
+        run: |
+          $link = "rdp://$Env:LOCALXPOSE_SUBDOMAIN.loclx.io:3389"
+          Set-Content -Path links/rdp_link.txt -Value $link
 
       - name: Commit and push RDP link
+        shell: powershell
         run: |
           git config --global user.name "Auto Bot"
           git config --global user.email "auto@bot.com"
           git add links/rdp_link.txt
-          git commit -m "Updated RDP link %DATE%" || echo "No changes"
-          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} HEAD:main
+          git commit -m "Updated RDP link $(Get-Date -Format u)" || Write-Host "No changes to commit"
+          git push origin main
 
-      - name: Install AWS CLI
+      - name: Install AWS CLI (for backup)
+        shell: powershell
         run: |
           curl "https://awscli.amazonaws.com/AWSCLIV2.msi" -o "AWSCLIV2.msi"
           msiexec.exe /i AWSCLIV2.msi /quiet
 
-      - name: Restore Backup from Filebase
+      - name: Restore Backup from Filebase (if exists)
+        shell: powershell
         run: |
-          mkdir C:\backup
-          aws configure set aws_access_key_id %FILEBASE_ACCESS_KEY%
-          aws configure set aws_secret_access_key %FILEBASE_SECRET_KEY%
-          aws configure set default.region us-east-1
-          aws --endpoint-url=https://s3.filebase.com s3 cp s3://%FILEBASE_BUCKET%/data.zip C:\backup\data.zip || echo "No backup found"
-          if exist C:\backup\data.zip powershell -Command "Expand-Archive -Path C:\backup\data.zip -DestinationPath C:\data -Force"
+          if (Test-Path "C:\backup\data.zip") { Remove-Item "C:\backup\data.zip" -Force }
+          New-Item -ItemType Directory -Path C:\backup -Force
+          aws --endpoint-url=https://s3.filebase.com s3 cp s3://$Env:FILEBASE_BUCKET/data.zip C:\backup\data.zip || Write-Host "No backup found"
+          if (Test-Path "C:\backup\data.zip") {
+            Expand-Archive -Path C:\backup\data.zip -DestinationPath C:\data -Force
+          }
 
-      - name: Auto Backup Every 30 Minutes (loop)
-        shell: pwsh
+      - name: Backup Folder Every 30 mins (loop)
+        shell: powershell
         run: |
           while ($true) {
             Compress-Archive -Path C:\data\* -DestinationPath C:\backup\data.zip -Force
-            aws --endpoint-url=https://s3.filebase.com s3 cp C:\backup\data.zip s3://$env:FILEBASE_BUCKET/data.zip
+            aws --endpoint-url=https://s3.filebase.com s3 cp C:\backup\data.zip s3://$Env:FILEBASE_BUCKET/data.zip
             Start-Sleep -Seconds 1800
           }
-
-      - name: Keep job alive
-        run: ping -t localhost
