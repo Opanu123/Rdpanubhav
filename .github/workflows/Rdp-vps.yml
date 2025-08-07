@@ -12,7 +12,7 @@ jobs:
 
     env:
       LOCALXPOSE_AUTH_TOKEN: ${{ secrets.LOCALXPOSE_AUTH_TOKEN }}
-      LOCALXPOSE_SUBDOMAIN: gamingrdp   # your chosen subdomain
+      LOCALXPOSE_SUBDOMAIN: gamingrdp  # replace with your LocalXpose reserved subdomain
       FILEBASE_ACCESS_KEY: ${{ secrets.FILEBASE_ACCESS_KEY }}
       FILEBASE_SECRET_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
       FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
@@ -24,63 +24,66 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Enable Windows RDP & Firewall
-        shell: powershell
         run: |
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
           netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
 
-      - name: Set RDP user password
+      - name: Create or Set RDP User Password
         shell: powershell
-        run: net user $Env:RDP_USER $Env:RDP_PASSWORD
+        run: |
+          $user = "$Env:RDP_USER"
+          $password = "$Env:RDP_PASSWORD"
+          $userExists = Get-LocalUser -Name $user -ErrorAction SilentlyContinue
+
+          if (-not $userExists) {
+            Write-Host "User $user does not exist. Creating user..."
+            net user $user $password /add
+            net localgroup "Remote Desktop Users" $user /add
+          } else {
+            Write-Host "User $user exists. Setting password..."
+            net user $user $password
+          }
 
       - name: Download LocalXpose
-        shell: powershell
         run: curl -L https://localxpose.io/releases/windows/localxpose.exe -o localxpose.exe
 
       - name: Login LocalXpose
-        shell: powershell
-        run: .\localxpose.exe login --auth-token $Env:LOCALXPOSE_AUTH_TOKEN
+        run: .\localxpose.exe login --auth-token %LOCALXPOSE_AUTH_TOKEN%
 
       - name: Start LocalXpose Tunnel (background)
-        shell: powershell
-        run: Start-Process -NoNewWindow -FilePath .\localxpose.exe -ArgumentList "tunnel tcp --port 3389 --subdomain $Env:LOCALXPOSE_SUBDOMAIN"
+        shell: pwsh
+        run: Start-Process -NoNewWindow -FilePath .\localxpose.exe -ArgumentList "tunnel tcp --port 3389 --subdomain %LOCALXPOSE_SUBDOMAIN%"
 
       - name: Save RDP Link to repo
-        shell: powershell
-        run: |
-          $link = "rdp://$Env:LOCALXPOSE_SUBDOMAIN.loclx.io:3389"
-          Set-Content -Path links/rdp_link.txt -Value $link
+        run: echo "rdp://%LOCALXPOSE_SUBDOMAIN%.loclx.io:3389" > links/rdp_link.txt
 
       - name: Commit and push RDP link
-        shell: powershell
         run: |
           git config --global user.name "Auto Bot"
           git config --global user.email "auto@bot.com"
           git add links/rdp_link.txt
-          git commit -m "Updated RDP link $(Get-Date -Format u)" || Write-Host "No changes to commit"
+          git commit -m "Updated RDP link $(Get-Date -Format u)" || echo "No changes to commit"
           git push origin main
 
       - name: Install AWS CLI (for backup)
-        shell: powershell
         run: |
           curl "https://awscli.amazonaws.com/AWSCLIV2.msi" -o "AWSCLIV2.msi"
           msiexec.exe /i AWSCLIV2.msi /quiet
 
       - name: Restore Backup from Filebase (if exists)
-        shell: powershell
         run: |
           if (Test-Path "C:\backup\data.zip") { Remove-Item "C:\backup\data.zip" -Force }
           New-Item -ItemType Directory -Path C:\backup -Force
-          aws --endpoint-url=https://s3.filebase.com s3 cp s3://$Env:FILEBASE_BUCKET/data.zip C:\backup\data.zip || Write-Host "No backup found"
+          aws --endpoint-url=https://s3.filebase.com s3 cp s3://%FILEBASE_BUCKET%/data.zip C:\backup\data.zip || echo "No backup found"
           if (Test-Path "C:\backup\data.zip") {
             Expand-Archive -Path C:\backup\data.zip -DestinationPath C:\data -Force
           }
 
       - name: Backup Folder Every 30 mins (loop)
-        shell: powershell
+        shell: pwsh
         run: |
           while ($true) {
             Compress-Archive -Path C:\data\* -DestinationPath C:\backup\data.zip -Force
-            aws --endpoint-url=https://s3.filebase.com s3 cp C:\backup\data.zip s3://$Env:FILEBASE_BUCKET/data.zip
+            aws --endpoint-url=https://s3.filebase.com s3 cp C:\backup\data.zip s3://%FILEBASE_BUCKET%/data.zip
             Start-Sleep -Seconds 1800
           }
