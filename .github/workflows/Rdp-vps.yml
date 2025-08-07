@@ -1,101 +1,73 @@
-name: Windows RDP with LocalXpose + Auto Backup
+name: Windows RDP with LocalXpose and Filebase
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"  # every 6 hours
+    - cron: '0 */6 * * *'  # every 6 hours
 
 jobs:
-  rdp:
+  windows-rdp:
     runs-on: windows-latest
-    timeout-minutes: 350
-
-    env:
-      LOCALXPOSE_AUTH_TOKEN: ${{ secrets.LOCALXPOSE_AUTH_TOKEN }}
-      LOCALXPOSE_SUBDOMAIN: gamingrdp
-      FILEBASE_ACCESS_KEY: ${{ secrets.FILEBASE_ACCESS_KEY }}
-      FILEBASE_SECRET_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
-      FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
-      RDP_USER: runner
-      RDP_PASSWORD: MySecure1234!
-
+    timeout-minutes: 360  # 6 hours max
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Enable Windows RDP & Firewall
+      - name: 🧾 Setup Environment
         run: |
+          $env:RDP_USER = "rdpuser"
+          $env:RDP_PASSWORD = "MySecurePass123!"
+          echo "USERNAME=$env:RDP_USER" >> $env:GITHUB_ENV
+          echo "PASSWORD=$env:RDP_PASSWORD" >> $env:GITHUB_ENV
+
+      - name: 💾 Download and Setup LocalXpose
+        run: |
+          Invoke-WebRequest -Uri "https://localxpose.io/downloads/localxpose-windows-amd64.exe" -OutFile "localxpose.exe"
+          Start-Sleep -Seconds 2
+          .\localxpose.exe login --auth-token $Env:LOCALXPOSE_AUTH_TOKEN
+        env:
+          LOCALXPOSE_AUTH_TOKEN: ${{ secrets.LOCALXPOSE_AUTH_TOKEN }}
+
+      - name: 🌐 Start LocalXpose RDP Tunnel (gamingrdp)
+        run: |
+          Start-Process -NoNewWindow -FilePath "localxpose.exe" -ArgumentList "tunnel rdp --subdomain gamingrdp" 
+
+      - name: 👤 Create RDP User
+        run: |
+          net user $Env:USERNAME $Env:PASSWORD /add
+          net localgroup administrators $Env:USERNAME /add
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
-          netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
-      - name: Create and configure RDP user
-        shell: pwsh
+      - name: 📦 Install 7-Zip and AWS CLI
         run: |
-          $RDP_USER = "${{ env.RDP_USER }}"
-          $RDP_PASSWORD_FULL = "${{ env.RDP_PASSWORD }}"
-          $RDP_PASSWORD = $RDP_PASSWORD_FULL.Substring(0, [Math]::Min($RDP_PASSWORD_FULL.Length,14))
+          choco install 7zip awscli -y
 
-          $userExists = Get-LocalUser -Name $RDP_USER -ErrorAction SilentlyContinue
-
-          if (-not $userExists) {
-              Write-Host "User $RDP_USER does not exist. Creating user..."
-              net user $RDP_USER $RDP_PASSWORD /add
-          } else {
-              Write-Host "User $RDP_USER already exists. Setting password..."
-              net user $RDP_USER $RDP_PASSWORD
+      - name: 🗃️ Restore from Filebase (if backup exists)
+        run: |
+          mkdir backup
+          aws configure set aws_access_key_id $env:FILEBASE_ACCESS_KEY
+          aws configure set aws_secret_access_key $env:FILEBASE_SECRET_KEY
+          aws configure set default.region us-east-1
+          aws s3 cp s3://$env:FILEBASE_BUCKET/system-backup.zip backup/system-backup.zip || echo "No backup yet"
+          if (Test-Path "backup/system-backup.zip") {
+            Expand-Archive -Path backup/system-backup.zip -DestinationPath C:\ -Force
           }
+        env:
+          FILEBASE_ACCESS_KEY: ${{ secrets.FILEBASE_ACCESS_KEY }}
+          FILEBASE_SECRET_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
+          FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
 
-          $rdpGroup = Get-LocalGroup | Where-Object { $_.Name -match 'Remote Desktop Users' }
-
-          if ($rdpGroup) {
-              Write-Host "Adding user $RDP_USER to group '$($rdpGroup.Name)'"
-              Add-LocalGroupMember -Group $rdpGroup.Name -Member $RDP_USER -ErrorAction SilentlyContinue
+      - name: 🔄 Auto Backup Loop (every 30 min)
+        run: |
+          Start-Job -ScriptBlock {
+            while ($true) {
+              Compress-Archive -Path "C:\Users\$env:USERNAME" -DestinationPath "C:\backup.zip" -Force
+              aws s3 cp C:\backup.zip s3://$env:FILEBASE_BUCKET/system-backup.zip --region us-east-1
+              Start-Sleep -Seconds 1800  # 30 minutes
+            }
           }
+        env:
+          FILEBASE_ACCESS_KEY: ${{ secrets.FILEBASE_ACCESS_KEY }}
+          FILEBASE_SECRET_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
+          FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
 
-      - name: Download LocalXpose
-        run: curl -L https://localxpose.io/releases/windows/localxpose.exe -o localxpose.exe
-
-      - name: Login LocalXpose
-        run: .\localxpose.exe login --auth-token ${{ secrets.LOCALXPOSE_AUTH_TOKEN }}
-
-      - name: Start LocalXpose Tunnel (background)
-        shell: pwsh
-        run: |
-          Start-Process -NoNewWindow -FilePath .\localxpose.exe -ArgumentList "tunnel tcp --port 3389 --subdomain $env:LOCALXPOSE_SUBDOMAIN"
-
-      - name: Save RDP Link to repo
-        run: |
-          mkdir links
-          echo "rdp://${{ env.LOCALXPOSE_SUBDOMAIN }}.loclx.io:3389" > links/rdp_link.txt
-
-      - name: Commit and push RDP link
-        run: |
-          git config --global user.name "Auto Bot"
-          git config --global user.email "auto@bot.com"
-          git add links/rdp_link.txt
-          git commit -m "Updated RDP link $(Get-Date -Format u)" || echo "No changes to commit"
-          git push origin main
-
-      - name: Install AWS CLI (for backup)
-        run: |
-          curl "https://awscli.amazonaws.com/AWSCLIV2.msi" -o "AWSCLIV2.msi"
-          msiexec.exe /i AWSCLIV2.msi /quiet
-
-      - name: Restore Backup from Filebase (if exists)
-        shell: pwsh
-        run: |
-          if (Test-Path "C:\backup\data.zip") { Remove-Item "C:\backup\data.zip" -Force }
-          New-Item -ItemType Directory -Path C:\backup -Force
-          aws --endpoint-url=https://s3.filebase.com s3 cp s3://${{ env.FILEBASE_BUCKET }}/data.zip C:\backup\data.zip || Write-Host "No backup found"
-          if (Test-Path "C:\backup\data.zip") {
-            Expand-Archive -Path C:\backup\data.zip -DestinationPath C:\data -Force
-          }
-
-      - name: Backup Folder Every 30 mins (loop)
-        shell: pwsh
-        run: |
-          while ($true) {
-            Compress-Archive -Path C:\data\* -DestinationPath C:\backup\data.zip -Force
-            aws --endpoint-url=https://s3.filebase.com s3 cp C:\backup\data.zip s3://${{ env.FILEBASE_BUCKET }}/data.zip
-            Start-Sleep -Seconds 1800
-          }
+      - name: 💤 Keep Session Alive
+        run: timeout /t 21500
