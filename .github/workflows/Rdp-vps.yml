@@ -1,74 +1,101 @@
-name: Windows RDP with LocalXpose and Backup
+name: Windows RDP with LocalXpose + Auto Backup
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"  # Every 6 hours
+    - cron: "0 */6 * * *"  # every 6 hours
 
 jobs:
   rdp:
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 350
 
     env:
-      RDP_USER: gamingrdp
-      RDP_PASSWORD: MySecurePass123!
+      LOCX_TOKEN: ${{ secrets.LOCAL_ACCESS_TOKEN }}
+      LOCALXPOSE_SUBDOMAIN: gamingrdp  # your reserved subdomain here
+      FILEBASE_ACCESS_KEY: ${{ secrets.FILEBASE_ACCESS_KEY }}
+      FILEBASE_SECRET_KEY: ${{ secrets.FILEBASE_SECRET_KEY }}
+      FILEBASE_BUCKET: ${{ secrets.FILEBASE_BUCKET }}
+      RDP_USER: runner
+      RDP_PASSWORD: MySecyrePass123!
 
     steps:
-      - name: 📁 Checkout repo
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: 🧪 Create RDP user and add to Administrators
+      - name: Enable Windows RDP & Firewall
         run: |
-          net user %RDP_USER% || net user %RDP_USER% %RDP_PASSWORD% /add
-          net localgroup administrators | findstr /C:"%RDP_USER%" >nul || net localgroup administrators %RDP_USER% /add
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+          netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
 
-      - name: 💻 Enable RDP and set password
+      - name: Create and configure RDP user
+        shell: pwsh
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          $RDP_USER = "${{ env.RDP_USER }}"
+          $RDP_PASSWORD_FULL = "${{ env.RDP_PASSWORD }}"
+          $RDP_PASSWORD = $RDP_PASSWORD_FULL.Substring(0, [Math]::Min($RDP_PASSWORD_FULL.Length,14))
 
-      - name: 🌐 Install LocalXpose tunnel
-        run: |
-          Invoke-WebRequest -Uri https://localxpose.io/localxpose.exe -OutFile localxpose.exe
-          ./localxpose.exe login --auth-token $Env:LOCX_TOKEN
-          ./localxpose.exe tcp --subdomain gamingrdp --port 3389 > lx.txt
+          $userExists = Get-LocalUser -Name $RDP_USER -ErrorAction SilentlyContinue
 
-      - name: 🕓 Start RDP wait loop and tunnel print
-        run: |
-          Start-Process -FilePath "localxpose.exe" -ArgumentList "tcp --subdomain gamingrdp --port 3389" -NoNewWindow
-          Start-Sleep -Seconds 30
-          Get-Content lx.txt
-
-      - name: 💾 Install AWS CLI (for Filebase)
-        run: |
-          msiexec.exe /i https://awscli.amazonaws.com/AWSCLIV2.msi /qn
-          echo "[default]" > $env:USERPROFILE\.aws\credentials
-          echo "aws_access_key_id=${{ secrets.FILEBASE_ACCESS_KEY }}" >> $env:USERPROFILE\.aws\credentials
-          echo "aws_secret_access_key=${{ secrets.FILEBASE_SECRET_KEY }}" >> $env:USERPROFILE\.aws\credentials
-          echo "[default]" > $env:USERPROFILE\.aws\config
-          echo "region = us-east-1" >> $env:USERPROFILE\.aws\config
-          echo "s3 =" >> $env:USERPROFILE\.aws\config
-          echo "  endpoint_url = https://s3.filebase.com" >> $env:USERPROFILE\.aws\config
-
-      - name: ♻️ Restore system files from Filebase
-        run: |
-          aws s3 cp s3://${{ secrets.FILEBASE_BUCKET }}/windows-backup.zip windows-backup.zip || echo "No previous backup found"
-          if (Test-Path "windows-backup.zip") {
-            Expand-Archive windows-backup.zip -DestinationPath C:\ || echo "No archive to extract"
+          if (-not $userExists) {
+              Write-Host "User $RDP_USER does not exist. Creating user..."
+              net user $RDP_USER $RDP_PASSWORD /add
+          } else {
+              Write-Host "User $RDP_USER already exists. Setting password..."
+              net user $RDP_USER $RDP_PASSWORD
           }
 
-      - name: 🔁 Auto-backup loop every 30 min
+          $rdpGroup = Get-LocalGroup | Where-Object { $_.Name -match 'Remote Desktop Users' }
+
+          if ($rdpGroup) {
+              Write-Host "Adding user $RDP_USER to group '$($rdpGroup.Name)'"
+              Add-LocalGroupMember -Group $rdpGroup.Name -Member $RDP_USER -ErrorAction SilentlyContinue
+          } else {
+              Write-Host "Remote Desktop Users group not found. Skipping group addition."
+          }
+
+      - name: Download LocalXpose
+        run: curl -L https://localxpose.io/releases/windows/localxpose.exe -o localxpose.exe
+
+      - name: Login LocalXpose
+        shell: pwsh
+        run: .\localxpose.exe login --auth-token $env:LOCX_TOKEN
+
+      - name: Start LocalXpose Tunnel (background)
+        shell: pwsh
+        run: Start-Process -NoNewWindow -FilePath .\localxpose.exe -ArgumentList "tunnel tcp --port 3389 --subdomain ${{ env.LOCALXPOSE_SUBDOMAIN }}"
+
+      - name: Save RDP Link to repo
+        run: echo "rdp://${{ env.LOCALXPOSE_SUBDOMAIN }}.loclx.io:3389" > links/rdp_link.txt
+
+      - name: Commit and push RDP link
         run: |
-          $code = @"
+          git config --global user.name "Auto Bot"
+          git config --global user.email "auto@bot.com"
+          git add links/rdp_link.txt
+          git commit -m "Updated RDP link $(Get-Date -Format u)" || echo "No changes to commit"
+          git push origin main
+
+      - name: Install AWS CLI (for backup)
+        run: |
+          curl "https://awscli.amazonaws.com/AWSCLIV2.msi" -o "AWSCLIV2.msi"
+          msiexec.exe /i AWSCLIV2.msi /quiet
+
+      - name: Restore Backup from Filebase (if exists)
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\backup\data.zip") { Remove-Item "C:\backup\data.zip" -Force }
+          New-Item -ItemType Directory -Path C:\backup -Force
+          aws --endpoint-url=https://s3.filebase.com s3 cp s3://${{ env.FILEBASE_BUCKET }}/data.zip C:\backup\data.zip || Write-Host "No backup found"
+          if (Test-Path "C:\backup\data.zip") {
+            Expand-Archive -Path C:\backup\data.zip -DestinationPath C:\data -Force
+          }
+
+      - name: Backup Folder Every 30 mins (loop)
+        shell: pwsh
+        run: |
           while ($true) {
-            Compress-Archive -Path C:\Users\$env:RDP_USER -DestinationPath backup.zip -Force
-            aws s3 cp backup.zip s3://${{ secrets.FILEBASE_BUCKET }}/windows-backup.zip
+            Compress-Archive -Path C:\data\* -DestinationPath C:\backup\data.zip -Force
+            aws --endpoint-url=https://s3.filebase.com s3 cp C:\backup\data.zip s3://${{ env.FILEBASE_BUCKET }}/data.zip
             Start-Sleep -Seconds 1800
           }
-"@
-          $code | Out-File backup.ps1 -Encoding ASCII
-          Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File backup.ps1"
-
-      - name: 💤 Keep alive
-        run: timeout /t 21600
